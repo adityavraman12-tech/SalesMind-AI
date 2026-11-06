@@ -720,598 +720,631 @@ hr {
 
 
 # =========================================================
-# LOAD DATA
+# UPLOAD + DATA PREPARATION
 # =========================================================
 
-FILE_PATH = "data/AI_Sales_Analytics_Sales_Data.xlsx"
+from io import BytesIO
+import re
 
-try:
+def read_uploaded_file(uploaded):
+    """Read an uploaded Excel or CSV file without assuming its column names."""
+    raw = uploaded.getvalue()
+    filename = uploaded.name.lower()
 
-    df = pd.read_excel(FILE_PATH)
+    if filename.endswith(".csv"):
+        try:
+            return pd.read_csv(BytesIO(raw))
+        except UnicodeDecodeError:
+            return pd.read_csv(BytesIO(raw), encoding="latin-1")
+    if filename.endswith((".xlsx", ".xls")):
+        return pd.read_excel(BytesIO(raw))
+    raise ValueError("Please upload an Excel (.xlsx, .xls) or CSV (.csv) file.")
 
-except FileNotFoundError:
 
-    st.error(f"Excel file not found: {FILE_PATH}")
-    st.stop()
+def clean_header(value):
+    value = str(value).strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "_", value)
+    return value.strip("_")
 
-except Exception as e:
 
-    st.error(f"Could not read Excel file: {e}")
-    st.stop()
+COLUMN_ALIASES = {
+    "Sales": [
+        "sales", "sale", "revenue", "total_revenue", "total_sales",
+        "net_sales", "gross_sales", "sales_amount", "revenue_amount",
+        "total_amount", "amount", "order_value", "total", "bill_amount",
+        "total_bill", "net_amount", "selling_price"
+    ],
+    "Profit": [
+        "profit", "net_profit", "gross_profit", "profit_amount",
+        "earnings", "net_earnings"
+    ],
+    "Cost": [
+        "cost", "total_cost", "cost_price", "expenses", "expense",
+        "total_expenses", "purchase_cost"
+    ],
+    "Order_Date": [
+        "order_date", "date", "transaction_date", "purchase_date",
+        "sale_date", "invoice_date", "bill_date", "created_at",
+        "datetime", "timestamp"
+    ],
+    "Category": [
+        "category", "product_category", "item_category", "segment",
+        "department", "type", "food_category", "menu_category"
+    ],
+    "Region": [
+        "region", "city", "state", "location", "area", "branch",
+        "store_location", "territory"
+    ],
+    "Product": [
+        "product", "product_name", "item", "item_name", "dish",
+        "dish_name", "menu_item", "service", "service_name",
+        "sku", "product_id"
+    ],
+    "Quantity": [
+        "quantity", "qty", "units", "units_sold", "items_sold",
+        "order_quantity", "count"
+    ],
+    "Order_ID": [
+        "order_id", "invoice_id", "transaction_id", "bill_no",
+        "bill_number", "receipt_id", "booking_id"
+    ],
+    "Customer": [
+        "customer", "customer_name", "customer_id", "client",
+        "client_name", "buyer"
+    ],
+}
+
+
+def map_business_columns(source):
+    """Add stable internal column names while retaining the original columns."""
+    frame = source.copy()
+    original_names = list(frame.columns)
+    cleaned_to_original = {}
+    for col in original_names:
+        cleaned_to_original.setdefault(clean_header(col), col)
+
+    mapped = {}
+    for standard_name, aliases in COLUMN_ALIASES.items():
+        for alias in aliases:
+            if alias in cleaned_to_original:
+                mapped[standard_name] = cleaned_to_original[alias]
+                break
+
+    # If no known revenue label exists, use a numeric column only when its
+    # name strongly suggests a monetary amount. Do not guess from arbitrary IDs.
+    if "Sales" not in mapped:
+        monetary_words = ("revenue", "sales", "amount", "total", "price", "bill", "value")
+        candidates = [
+            col for col in original_names
+            if any(word in clean_header(col) for word in monetary_words)
+            and pd.api.types.is_numeric_dtype(frame[col])
+        ]
+        if candidates:
+            mapped["Sales"] = candidates[0]
+
+    for standard_name, original_name in mapped.items():
+        if standard_name not in frame.columns:
+            frame[standard_name] = frame[original_name]
+
+    return frame, mapped
+
+
+def detect_business_type(columns):
+    names = " ".join(clean_header(c) for c in columns)
+    restaurant_terms = (
+        "dish", "menu", "food", "table", "waiter", "restaurant",
+        "cuisine", "recipe", "ingredient", "order_type"
+    )
+    retail_terms = ("sku", "inventory", "stock", "product", "supplier")
+    if any(term in names for term in restaurant_terms):
+        return "Restaurant"
+    if any(term in names for term in retail_terms):
+        return "Small / Retail Business"
+    if len(columns) >= 12:
+        return "Large Business"
+    return "Small Business"
+
+
+def prepare_dataframe(source):
+    frame, mapping = map_business_columns(source)
+    if frame.empty:
+        raise ValueError("The uploaded file contains no data rows.")
+
+    # Convert mapped metrics to numbers, tolerating currency symbols and commas.
+    for col in ("Sales", "Profit", "Cost", "Quantity"):
+        if col in frame.columns:
+            values = frame[col].astype(str).str.replace(",", "", regex=False)
+            values = values.str.replace(r"[₹$€£]", "", regex=True).str.strip()
+            frame[col] = pd.to_numeric(values, errors="coerce")
+
+    if "Order_Date" in frame.columns:
+        frame["Order_Date"] = pd.to_datetime(frame["Order_Date"], errors="coerce", dayfirst=True)
+
+    # Remove completely empty rows; retain rows with missing optional metrics.
+    frame = frame.dropna(how="all").copy()
+    if frame.empty:
+        raise ValueError("No usable records were found in this file.")
+
+    return frame, mapping
 
 
 # =========================================================
-# NORMALIZE COLUMNS
-# =========================================================
-
-df.columns = (
-    df.columns
-    .astype(str)
-    .str.strip()
-    .str.replace(" ", "_")
-)
-
-required_columns = [
-    "Order_Date",
-    "Category",
-    "Region",
-    "Sales",
-    "Profit"
-]
-
-missing = [
-    col for col in required_columns
-    if col not in df.columns
-]
-
-if missing:
-
-    st.error("Some required columns are missing.")
-
-    st.write("Missing:", missing)
-
-    st.write("Available columns:", df.columns.tolist())
-
-    st.stop()
-
-
-# =========================================================
-# CLEAN DATA
-# =========================================================
-
-df["Order_Date"] = pd.to_datetime(
-    df["Order_Date"],
-    errors="coerce"
-)
-
-df["Sales"] = pd.to_numeric(
-    df["Sales"],
-    errors="coerce"
-).fillna(0)
-
-df["Profit"] = pd.to_numeric(
-    df["Profit"],
-    errors="coerce"
-).fillna(0)
-
-df = df.dropna(subset=["Order_Date"])
-
-
-# =========================================================
-# SIDEBAR
+# SIDEBAR — WORKSPACE + BUSINESS PROFILE
 # =========================================================
 
 with st.sidebar:
-
     st.markdown("## ◈ SalesMind")
-
-    st.caption("AI-Powered Sales Intelligence")
-
+    st.caption("AI-Powered Business Intelligence")
     st.divider()
 
     st.markdown(
         '<div class="section-label">Workspace</div>',
         unsafe_allow_html=True
     )
-
     st.markdown("📊 **Overview**")
     st.markdown("📈 Analytics")
     st.markdown("🤖 AI Analyst")
     st.markdown("🗃️ Data Explorer")
-
     st.divider()
 
+    st.markdown(
+        '<div class="section-label">Your business</div>',
+        unsafe_allow_html=True
+    )
+    business_profile = st.selectbox(
+        "Business type",
+        ["Auto-detect", "Restaurant", "Small Business", "Large Business"],
+        help="Choose a profile or let SalesMind infer it from your spreadsheet columns."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload business data",
+        type=["csv", "xlsx", "xls"],
+        help="Upload a sales, orders, restaurant, retail, or business spreadsheet."
+    )
+
+    st.divider()
+    st.caption("Supported formats: CSV, XLSX, XLS")
+
+
+# =========================================================
+# EMPTY STATE
+# =========================================================
+
+if uploaded_file is None:
+    st.markdown(
+        '<div class="section-label">SALES INTELLIGENCE</div>',
+        unsafe_allow_html=True
+    )
+    st.title("Your business, understood.")
+    st.markdown(
+        "### Upload a spreadsheet to turn everyday business data into clear decisions."
+    )
+    st.markdown("")
+    intro1, intro2, intro3 = st.columns(3)
+    with intro1:
+        st.markdown("#### 📂 Any spreadsheet")
+        st.caption("Start with an Excel or CSV export. No fixed template required.")
+    with intro2:
+        st.markdown("#### 🧠 Business-aware")
+        st.caption("Identify useful sales, product, date, customer and cost fields.")
+    with intro3:
+        st.markdown("#### ✦ AI advisor")
+        st.caption("Explore performance, ask questions and get practical next steps.")
+    st.info("Use the upload control in the sidebar to get started.")
+    st.stop()
+
+
+# =========================================================
+# LOAD + VALIDATE UPLOADED DATA
+# =========================================================
+
+try:
+    source_df = read_uploaded_file(uploaded_file)
+    df, mapped_columns = prepare_dataframe(source_df)
+except Exception as exc:
+    st.error(f"Could not prepare this file: {exc}")
+    st.stop()
+
+detected_profile = detect_business_type(source_df.columns)
+active_profile = detected_profile if business_profile == "Auto-detect" else business_profile
+
+# Ensure the AI analyst receives the stable canonical field names when available.
+has_revenue = "Sales" in df.columns and df["Sales"].notna().any()
+has_profit = "Profit" in df.columns and df["Profit"].notna().any()
+has_cost = "Cost" in df.columns and df["Cost"].notna().any()
+has_dates = "Order_Date" in df.columns and df["Order_Date"].notna().any()
+
+if has_revenue:
+    df["Sales"] = df["Sales"].fillna(0)
+if has_profit:
+    df["Profit"] = df["Profit"].fillna(0)
+if has_cost:
+    df["Cost"] = df["Cost"].fillna(0)
+
+# Find the best descriptive dimension for product/category analysis.
+dimension_candidates = ["Product", "Category", "Customer", "Region"]
+available_dimensions = [
+    col for col in dimension_candidates
+    if col in df.columns and df[col].notna().any()
+]
+primary_dimension = (
+    "Product" if active_profile == "Restaurant" and "Product" in available_dimensions
+    else "Category" if "Category" in available_dimensions
+    else available_dimensions[0] if available_dimensions
+    else None
+)
+
+# Sidebar filters are shown only when their columns exist.
+with st.sidebar:
     st.markdown(
         '<div class="section-label">Filters</div>',
         unsafe_allow_html=True
     )
+    filtered_df = df.copy()
 
-    regions = ["All"] + sorted(
-        df["Region"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
+    if "Region" in df.columns and df["Region"].notna().any():
+        region_values = ["All"] + sorted(df["Region"].dropna().astype(str).unique().tolist())
+        selected_region = st.selectbox("Location / region", region_values)
+        if selected_region != "All":
+            filtered_df = filtered_df[filtered_df["Region"].astype(str) == selected_region]
 
-    selected_region = st.selectbox(
-        "Region",
-        regions
-    )
-
-    categories = ["All"] + sorted(
-        df["Category"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
-
-    selected_category = st.selectbox(
-        "Category",
-        categories
-    )
+    if "Category" in df.columns and df["Category"].notna().any():
+        category_values = ["All"] + sorted(df["Category"].dropna().astype(str).unique().tolist())
+        selected_category = st.selectbox("Category", category_values)
+        if selected_category != "All":
+            filtered_df = filtered_df[filtered_df["Category"].astype(str) == selected_category]
 
     st.divider()
-
     st.caption("● Data source connected")
-
-    st.caption(
-        f"{len(df):,} records loaded"
-    )
-
-
-# =========================================================
-# FILTER DATA
-# =========================================================
-
-filtered_df = df.copy()
-
-if selected_region != "All":
-
-    filtered_df = filtered_df[
-        filtered_df["Region"].astype(str)
-        == selected_region
-    ]
-
-if selected_category != "All":
-
-    filtered_df = filtered_df[
-        filtered_df["Category"].astype(str)
-        == selected_category
-    ]
+    st.caption(f"{len(df):,} records loaded")
+    st.caption(f"Detected: {detected_profile}")
 
 
 # =========================================================
 # HEADER
 # =========================================================
 
-header_col1, header_col2 = st.columns(
-    [5, 1]
-)
-
+header_col1, header_col2 = st.columns([5, 1])
 with header_col1:
-
     st.markdown(
-        '<div class="section-label">SALES INTELLIGENCE</div>',
+        '<div class="section-label">BUSINESS INTELLIGENCE</div>',
         unsafe_allow_html=True
     )
-
-    st.title("Good afternoon 👋")
-
-    st.markdown(
-        "### Here's what is happening with your sales."
-    )
-
+    st.title("Good evening 👋")
+    st.markdown(f"### Your {active_profile.lower()} performance, at a glance.")
 with header_col2:
-
     st.markdown(
         """
-        <div style="
-            text-align:right;
-            padding-top:25px;
-            color:#86efac;
-            font-size:13px;
-            font-weight:600;
-        ">
-        ● SYSTEM ONLINE
+        <div style="text-align:right;padding-top:25px;color:#86efac;font-size:13px;font-weight:600;">
+        ● DATA CONNECTED
         </div>
         """,
         unsafe_allow_html=True
     )
+
+st.caption(
+    f"File: {uploaded_file.name}  ·  {len(df):,} rows  ·  {len(source_df.columns):,} original columns"
+)
 
 
 # =========================================================
 # KPI CALCULATIONS
 # =========================================================
 
-total_sales = filtered_df["Sales"].sum()
+total_sales = float(filtered_df["Sales"].fillna(0).sum()) if has_revenue else None
+total_profit = float(filtered_df["Profit"].fillna(0).sum()) if has_profit else None
+total_cost = float(filtered_df["Cost"].fillna(0).sum()) if has_cost else None
+record_count = len(filtered_df)
 
-total_profit = filtered_df["Profit"].sum()
-
-orders = len(filtered_df)
-
+order_count = (
+    filtered_df["Order_ID"].nunique()
+    if "Order_ID" in filtered_df.columns
+    else record_count
+)
+average_order = total_sales / order_count if total_sales is not None and order_count else None
 profit_margin = (
     total_profit / total_sales * 100
-    if total_sales != 0
-    else 0
+    if total_profit is not None and total_sales not in (None, 0)
+    else None
 )
 
-average_order = (
-    total_sales / orders
-    if orders != 0
-    else 0
-)
+kpi_items = []
+if total_sales is not None:
+    kpi_items.append(("TOTAL REVENUE", f"₹{total_sales:,.0f}"))
+if total_profit is not None:
+    kpi_items.append(("TOTAL PROFIT", f"₹{total_profit:,.0f}"))
+if profit_margin is not None:
+    kpi_items.append(("PROFIT MARGIN", f"{profit_margin:.1f}%"))
+if total_cost is not None and total_profit is None:
+    kpi_items.append(("TOTAL COST", f"₹{total_cost:,.0f}"))
+if average_order is not None:
+    kpi_items.append(("AVERAGE ORDER", f"₹{average_order:,.0f}"))
+kpi_items.append(("RECORDS", f"{record_count:,}"))
+
+kpi_cols = st.columns(min(4, len(kpi_items)))
+for index, (label, value) in enumerate(kpi_items[:4]):
+    with kpi_cols[index]:
+        st.metric(label, value)
+
+if not has_revenue:
+    st.warning(
+        "I couldn't confidently identify a revenue or sales column. "
+        "Your data is loaded, but revenue-based KPIs and charts are unavailable. "
+        "Check that your spreadsheet has a column such as Revenue, Sales, Amount or Total."
+    )
 
 
 # =========================================================
-# KPI CARDS
+# PERFORMANCE + PROACTIVE BUSINESS REVIEW
 # =========================================================
-
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-
-    st.metric(
-        "TOTAL REVENUE",
-        f"₹{total_sales:,.0f}"
-    )
-
-with c2:
-
-    st.metric(
-        "TOTAL PROFIT",
-        f"₹{total_profit:,.0f}"
-    )
-
-with c3:
-
-    st.metric(
-        "PROFIT MARGIN",
-        f"{profit_margin:.1f}%"
-    )
-
-with c4:
-
-    st.metric(
-        "TOTAL ORDERS",
-        f"{orders:,}"
-    )
-
 
 st.markdown("<br>", unsafe_allow_html=True)
-
-
-# =========================================================
-# MAIN ANALYTICS AREA
-# =========================================================
-
-chart_col, ai_col = st.columns(
-    [2.2, 1]
-)
-
-
-# =========================================================
-# SALES TREND
-# =========================================================
+chart_col, ai_col = st.columns([2.2, 1])
 
 with chart_col:
-
-    st.markdown(
-        '<div class="section-label">PERFORMANCE</div>',
-        unsafe_allow_html=True
-    )
-
+    st.markdown('<div class="section-label">PERFORMANCE</div>', unsafe_allow_html=True)
     st.subheader("Revenue trend")
 
-    monthly_sales = (
-        filtered_df
-        .groupby(
-            filtered_df["Order_Date"]
-            .dt.to_period("M")
-        )["Sales"]
-        .sum()
-        .reset_index()
-    )
-
-    monthly_sales["Order_Date"] = (
-        monthly_sales["Order_Date"]
-        .astype(str)
-    )
-
-    if not monthly_sales.empty:
-
-        fig = px.area(
-            monthly_sales,
-            x="Order_Date",
-            y="Sales",
-            markers=True
-        )
-
-        fig.update_traces(
-            line=dict(width=3, color="#818cf8"),
-            fillcolor="rgba(129,140,248,0.16)",
-            marker=dict(size=7, color="#a5b4fc", line=dict(width=2, color="#0b1020")),
-            hovertemplate="%{x}<br><b>Revenue:</b> ₹%{y:,.0f}<extra></extra>"
-        )
-        polish_chart(fig, height=345)
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True,
-            config={"displayModeBar": False, "scrollZoom": False}
-        )
-
-
-# =========================================================
-# AI INSIGHT CARD
-# =========================================================
+    if has_revenue and has_dates:
+        dated = filtered_df.dropna(subset=["Order_Date"]).copy()
+        if not dated.empty:
+            monthly_sales = (
+                dated.groupby(dated["Order_Date"].dt.to_period("M"))["Sales"]
+                .sum().reset_index()
+            )
+            monthly_sales["Order_Date"] = monthly_sales["Order_Date"].astype(str)
+            fig = px.area(monthly_sales, x="Order_Date", y="Sales", markers=True)
+            fig.update_traces(
+                line=dict(width=3, color="#818cf8"),
+                fillcolor="rgba(129,140,248,0.16)",
+                marker=dict(size=7, color="#a5b4fc", line=dict(width=2, color="#0b1020")),
+                hovertemplate="%{x}<br><b>Revenue:</b> ₹%{y:,.0f}<extra></extra>"
+            )
+            polish_chart(fig, height=345)
+            st.plotly_chart(
+                fig, use_container_width=True,
+                config={"displayModeBar": False, "scrollZoom": False},
+                key="salesmind_revenue_trend"
+            )
+        else:
+            st.info("A date column was detected, but it contains no usable dates.")
+    elif has_revenue:
+        st.info("Revenue is available. Add a date column (for example Order Date or Transaction Date) to see a trend.")
+    else:
+        st.info("A revenue trend will appear when Sales, Revenue, Amount or a similar column is available.")
 
 with ai_col:
-
     with st.container(border=True):
-
-        st.caption("✦ AI INSIGHT")
-
+        st.caption("✦ AI BUSINESS ADVISOR")
         st.markdown(
-            '<span class="ai-live-badge"><span class="ai-live-dot"></span>NEMOTRON • ONLINE</span>',
+            '<span class="ai-live-badge"><span class="ai-live-dot"></span>NVIDIA NEMOTRON • OPTIONAL</span>',
             unsafe_allow_html=True
         )
-
-        st.markdown("### Sales intelligence")
-
+        st.markdown("### Business intelligence")
         st.write(
-            "SalesMind combines deterministic sales calculations with "
-            "NVIDIA Nemotron to turn your numbers into clear business insights."
+            f"SalesMind has loaded your {active_profile.lower()} dataset and is using "
+            "locally calculated metrics as the evidence base for its analysis."
         )
-
         st.divider()
+        if st.button("Generate business review", use_container_width=True):
+            with st.spinner("Reviewing your business data..."):
+                try:
+                    review = analyze_question(
+                        filtered_df,
+                        "Give me an executive summary of this business data, its strongest observed patterns, risks, and three practical actions to improve performance."
+                    )
+                    st.session_state["salesmind_business_review"] = review
+                except Exception as exc:
+                    st.session_state["salesmind_business_review"] = {
+                        "answer": "The business review could not be generated.",
+                        "evidence": [str(exc)[:300]]
+                    }
 
-        st.markdown("**Ask SalesMind**")
+        if "salesmind_business_review" in st.session_state:
+            review = st.session_state["salesmind_business_review"]
+            st.success(review.get("answer", "No review was returned."))
+            if review.get("evidence"):
+                with st.expander("Review evidence"):
+                    for evidence_item in review["evidence"]:
+                        st.write(f"• {evidence_item}")
+        else:
+            st.caption("Generate a review to receive an evidence-based summary and practical next steps.")
 
-        st.caption(
-            "Compare categories, regions and trends, investigate profit "
-            "performance, and surface what is driving the numbers."
-        )
+
 # =========================================================
-# CATEGORY + REGION
+# PRODUCT / CATEGORY / LOCATION ANALYTICS
 # =========================================================
 
 st.markdown("<br>", unsafe_allow_html=True)
-
 left, right = st.columns(2)
 
-
 with left:
-
-    st.markdown(
-        '<div class="section-label">PRODUCT MIX</div>',
-        unsafe_allow_html=True
-    )
-
-    st.subheader("Sales by category")
-
-    category_sales = (
-        filtered_df
-        .groupby("Category")["Sales"]
-        .sum()
-        .reset_index()
-        .sort_values(
-            "Sales",
-            ascending=False
+    st.markdown('<div class="section-label">PRODUCT MIX</div>', unsafe_allow_html=True)
+    st.subheader("Performance by product or category")
+    if has_revenue and primary_dimension:
+        grouped = (
+            filtered_df.groupby(primary_dimension, dropna=False)["Sales"]
+            .sum().reset_index().sort_values("Sales", ascending=False).head(12)
         )
-    )
-
-    fig_category = px.bar(
-        category_sales,
-        x="Category",
-        y="Sales",
-        color="Sales",
-        color_continuous_scale=["#312e81", "#6366f1", "#a5b4fc"],
-        text_auto=".2s"
-    )
-
-    fig_category.update_traces(
-        marker_line_width=0,
-        opacity=0.92,
-        hovertemplate="<b>%{x}</b><br>Sales: ₹%{y:,.0f}<extra></extra>"
-    )
-    polish_chart(fig_category, height=315)
-    fig_category.update_coloraxes(showscale=False)
-
-    st.plotly_chart(
-        fig_category,
-        use_container_width=True,
-        config={"displayModeBar": False, "scrollZoom": False}
-    )
-
+        grouped[primary_dimension] = grouped[primary_dimension].fillna("Unknown").astype(str)
+        fig_group = px.bar(
+            grouped, x=primary_dimension, y="Sales",
+            color="Sales",
+            color_continuous_scale=["#312e81", "#6366f1", "#a5b4fc"],
+            text_auto=".2s"
+        )
+        fig_group.update_traces(
+            marker_line_width=0, opacity=0.92,
+            hovertemplate="<b>%{x}</b><br>Revenue: ₹%{y:,.0f}<extra></extra>"
+        )
+        polish_chart(fig_group, height=315)
+        fig_group.update_coloraxes(showscale=False)
+        st.plotly_chart(
+            fig_group, use_container_width=True,
+            config={"displayModeBar": False, "scrollZoom": False},
+            key="salesmind_product_mix"
+        )
+    elif primary_dimension:
+        counts = filtered_df[primary_dimension].fillna("Unknown").astype(str).value_counts().head(12).reset_index()
+        counts.columns = [primary_dimension, "Records"]
+        fig_count = px.bar(counts, x=primary_dimension, y="Records", text_auto=True)
+        polish_chart(fig_count, height=315)
+        st.plotly_chart(
+            fig_count, use_container_width=True,
+            config={"displayModeBar": False, "scrollZoom": False},
+            key="salesmind_dimension_counts"
+        )
+    else:
+        st.info("Add a product, item, category, customer or similar column to see a breakdown.")
 
 with right:
-
-    st.markdown(
-        '<div class="section-label">GEOGRAPHY</div>',
-        unsafe_allow_html=True
-    )
-
-    st.subheader("Sales by region")
-
-    region_sales = (
-        filtered_df
-        .groupby("Region")["Sales"]
-        .sum()
-        .reset_index()
-        .sort_values(
-            "Sales",
-            ascending=False
-        )
-    )
-
-    fig_region = px.bar(
-        region_sales,
-        x="Region",
-        y="Sales",
-        color="Sales",
-        color_continuous_scale=["#164e63", "#0891b2", "#67e8f9"],
-        text_auto=".2s"
-    )
-
-    fig_region.update_traces(
-        marker_line_width=0,
-        opacity=0.92,
-        hovertemplate="<b>%{x}</b><br>Sales: ₹%{y:,.0f}<extra></extra>"
-    )
-    polish_chart(fig_region, height=315)
-    fig_region.update_coloraxes(showscale=False)
-
-    st.plotly_chart(
-        fig_region,
-        use_container_width=True,
-        config={"displayModeBar": False, "scrollZoom": False}
-    )
-
-
-# =========================================================
-# 3D SALES LANDSCAPE
-# =========================================================
-
-if not filtered_df.empty:
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-label">3D OVERVIEW</div>', unsafe_allow_html=True)
-    st.subheader("Sales landscape")
-    st.caption("Interactive 3D view of sales across categories and regions.")
-
-    landscape = (
-        filtered_df
-        .groupby(["Category", "Region"], as_index=False)["Sales"]
-        .sum()
-    )
-
-    if not landscape.empty:
-        fig_3d = px.scatter_3d(
-            landscape,
-            x="Category",
-            y="Region",
-            z="Sales",
-            size="Sales",
-            color="Category",
-            hover_data={"Sales": ":,.0f"},
-            opacity=0.88
-        )
-        fig_3d.update_traces(
-            marker=dict(line=dict(width=1, color="rgba(255,255,255,0.25)")),
-            hovertemplate=(
-                "<b>Category:</b> %{x}<br>"
-                "<b>Region:</b> %{y}<br>"
-                "<b>Sales:</b> ₹%{z:,.0f}<extra></extra>"
+    st.markdown('<div class="section-label">BUSINESS BREAKDOWN</div>', unsafe_allow_html=True)
+    if active_profile == "Restaurant":
+        st.subheader("Popular menu items")
+        item_col = "Product" if "Product" in filtered_df.columns else primary_dimension
+        if item_col:
+            if "Quantity" in filtered_df.columns and filtered_df["Quantity"].notna().any():
+                item_data = (
+                    filtered_df.groupby(item_col, dropna=False)["Quantity"]
+                    .sum().sort_values(ascending=False).head(10).reset_index()
+                )
+                y_label = "Quantity"
+            elif has_revenue:
+                item_data = (
+                    filtered_df.groupby(item_col, dropna=False)["Sales"]
+                    .sum().sort_values(ascending=False).head(10).reset_index()
+                )
+                y_label = "Sales"
+            else:
+                item_data = filtered_df[item_col].fillna("Unknown").astype(str).value_counts().head(10).reset_index()
+                item_data.columns = [item_col, "Orders"]
+                y_label = "Orders"
+            item_data[item_col] = item_data[item_col].fillna("Unknown").astype(str)
+            fig_items = px.bar(item_data, x=item_col, y=y_label, text_auto=".2s")
+            polish_chart(fig_items, height=315)
+            st.plotly_chart(
+                fig_items, use_container_width=True,
+                config={"displayModeBar": False, "scrollZoom": False},
+                key="salesmind_restaurant_items"
             )
+        else:
+            st.info("Add an item, dish or product column to identify popular menu items.")
+    elif "Region" in filtered_df.columns and has_revenue:
+        st.subheader("Revenue by location")
+        region_data = (
+            filtered_df.groupby("Region", dropna=False)["Sales"]
+            .sum().sort_values(ascending=False).head(10).reset_index()
         )
-        fig_3d.update_layout(
-            height=430,
-            margin=dict(l=0, r=0, t=8, b=0),
-            paper_bgcolor="rgba(0,0,0,0)",
-            scene=dict(
-                bgcolor="rgba(0,0,0,0)",
-                xaxis=dict(showbackground=False, gridcolor="rgba(255,255,255,0.06)", color="#94a3b8"),
-                yaxis=dict(showbackground=False, gridcolor="rgba(255,255,255,0.06)", color="#94a3b8"),
-                zaxis=dict(showbackground=False, gridcolor="rgba(255,255,255,0.06)", color="#94a3b8"),
-                camera=dict(eye=dict(x=1.55, y=1.55, z=1.15))
-            ),
-            font=dict(family="Inter, sans-serif", color="#94a3b8"),
-            legend=dict(font=dict(color="#cbd5e1"))
+        region_data["Region"] = region_data["Region"].fillna("Unknown").astype(str)
+        fig_region = px.bar(
+            region_data, x="Region", y="Sales", color="Sales",
+            color_continuous_scale=["#164e63", "#0891b2", "#67e8f9"],
+            text_auto=".2s"
         )
+        polish_chart(fig_region, height=315)
+        fig_region.update_coloraxes(showscale=False)
         st.plotly_chart(
-            fig_3d,
-            use_container_width=True,
-            config={"displayModeBar": False, "scrollZoom": True}
+            fig_region, use_container_width=True,
+            config={"displayModeBar": False, "scrollZoom": False},
+            key="salesmind_location_breakdown"
         )
+    elif "Customer" in filtered_df.columns:
+        st.subheader("Customer activity")
+        customer_counts = filtered_df["Customer"].fillna("Unknown").astype(str).value_counts().head(10).reset_index()
+        customer_counts.columns = ["Customer", "Records"]
+        fig_customer = px.bar(customer_counts, x="Customer", y="Records", text_auto=True)
+        polish_chart(fig_customer, height=315)
+        st.plotly_chart(
+            fig_customer, use_container_width=True,
+            config={"displayModeBar": False, "scrollZoom": False},
+            key="salesmind_customer_activity"
+        )
+    else:
+        st.subheader("Data overview")
+        st.metric("Usable records", f"{len(filtered_df):,}")
+        st.caption("A location, customer or product field will unlock a more detailed breakdown.")
 
 
 # =========================================================
-# ASK AI
+# ASK SALESMIND AI
 # =========================================================
 
 st.markdown("<br>", unsafe_allow_html=True)
-
+st.markdown('<div class="section-label">ASK YOUR DATA</div>', unsafe_allow_html=True)
+st.subheader("What would you like to understand?")
 question = st.text_input(
     "Ask a question",
-    placeholder='Try: "Which category generates the most profit?"',
+    placeholder='Try: "Which product has the highest revenue?" or "How can I improve my business?"',
     label_visibility="collapsed",
     key="salesmind_ai_question"
 )
 
 if question:
-    with st.spinner("Analyzing your sales data..."):
+    with st.spinner("Analysing your business data..."):
+        try:
+            result = analyze_question(filtered_df, question)
+        except Exception as exc:
+            result = {
+                "answer": "I couldn't complete that analysis. Check the dataset columns and try again.",
+                "evidence": [str(exc)[:300]],
+                "chart_data": None,
+                "chart_type": None,
+                "title": "Analysis unavailable"
+            }
 
-        result = analyze_question(
-            filtered_df,
-            question
-        )
-
-    # AI Answer
     st.markdown("### 🤖 SalesMind AI")
+    st.success(result.get("answer", "No answer was returned."))
 
-    st.success(result["answer"])
-
-    # Evidence
-    if result["evidence"]:
-
-        with st.expander("🔎 Show me why", expanded=True):
-
+    if result.get("evidence"):
+        with st.expander("🔎 Show supporting evidence", expanded=True):
             for item in result["evidence"]:
                 st.markdown(f"• {item}")
 
-    # Chart
-    if result["chart_data"] is not None:
-
-        chart_data = result["chart_data"]
-
-        if result["chart_type"] == "bar":
-
-            x_col = chart_data.columns[0]
-            y_col = chart_data.columns[1]
-
-            fig_ai = px.bar(
-                chart_data,
-                x=x_col,
-                y=y_col,
-                title=result["title"]
-            )
-
-        elif result["chart_type"] == "line":
-
+    chart_data = result.get("chart_data")
+    chart_type = result.get("chart_type")
+    if isinstance(chart_data, pd.DataFrame) and not chart_data.empty:
+        if chart_type == "line" and {"Order_Date", "Sales"}.issubset(chart_data.columns):
             fig_ai = px.line(
-                chart_data,
-                x="Order_Date",
-                y="Sales",
-                markers=True,
-                title=result["title"]
+                chart_data, x="Order_Date", y="Sales",
+                markers=True, title=result.get("title", "Analysis")
             )
-
-        polish_chart(fig_ai, height=350)
-        fig_ai.update_traces(
-            marker_line_width=0,
-            opacity=0.92
-        )
-        st.plotly_chart(
-            fig_ai,
-            use_container_width=True,
-            config={"displayModeBar": False, "scrollZoom": False}
-        )
+        elif chart_type == "bar" and chart_data.shape[1] >= 2:
+            fig_ai = px.bar(
+                chart_data, x=chart_data.columns[0], y=chart_data.columns[1],
+                title=result.get("title", "Analysis")
+            )
+        else:
+            fig_ai = None
+        if fig_ai is not None:
+            polish_chart(fig_ai, height=350)
+            st.plotly_chart(
+                fig_ai, use_container_width=True,
+                config={"displayModeBar": False, "scrollZoom": False},
+                key="salesmind_ai_chart"
+            )
 
 
 # =========================================================
-# DATA EXPLORER
+# DATA EXPLORER + DATA QUALITY
 # =========================================================
 
 st.markdown("<br>", unsafe_allow_html=True)
+with st.expander("🗃️ Explore uploaded data"):
+    st.dataframe(filtered_df, use_container_width=True, hide_index=True)
 
-with st.expander("🗃️ View underlying sales data"):
-
-    st.dataframe(
-        filtered_df,
-        use_container_width=True,
-        hide_index=True
-    )
+with st.expander("🧹 Data quality and detected columns"):
+    quality_col1, quality_col2, quality_col3 = st.columns(3)
+    quality_col1.metric("Missing cells", f"{int(source_df.isna().sum().sum()):,}")
+    quality_col2.metric("Duplicate rows", f"{int(source_df.duplicated().sum()):,}")
+    quality_col3.metric("Columns detected", f"{len(source_df.columns):,}")
+    st.write("**Detected field mapping**")
+    if mapped_columns:
+        st.json({key: str(value) for key, value in mapped_columns.items()})
+    else:
+        st.info("No standard business fields were confidently detected. The original data is still available below.")
+    st.write("**Original column names**")
+    st.write([str(column) for column in source_df.columns])
 
 
 # =========================================================
@@ -1320,13 +1353,8 @@ with st.expander("🗃️ View underlying sales data"):
 
 st.markdown(
     """
-    <div style="
-        text-align:center;
-        padding:30px 0 10px 0;
-        color:#475569;
-        font-size:12px;
-    ">
-        SalesMind AI • Intelligent Sales Analytics
+    <div style="text-align:center;padding:30px 0 10px 0;color:#475569;font-size:12px;">
+        SalesMind AI • Intelligent Business Analytics
     </div>
     """,
     unsafe_allow_html=True
