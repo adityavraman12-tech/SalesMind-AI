@@ -21,9 +21,26 @@ try:
 except ImportError:
     OpenAI = None
 
+# Support either NVIDIA NIM directly or Nebius Token Factory.
+# If both keys are present, NVIDIA_API_KEY takes precedence.
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY) if NVIDIA_API_KEY and OpenAI else None
-MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b")
+NEBIUS_API_KEY = os.getenv("NEBIUS_API_KEY")
+
+if NVIDIA_API_KEY and OpenAI:
+    client = OpenAI(
+        base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+        api_key=NVIDIA_API_KEY,
+    )
+    MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b")
+elif NEBIUS_API_KEY and OpenAI:
+    client = OpenAI(
+        base_url=os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1/"),
+        api_key=NEBIUS_API_KEY,
+    )
+    MODEL = os.getenv("NEBIUS_MODEL", os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"))
+else:
+    client = None
+    MODEL = os.getenv("NEBIUS_MODEL", os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"))
 
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
