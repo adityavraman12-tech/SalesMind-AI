@@ -22,8 +22,8 @@ except ImportError:
     OpenAI = None
 
 
-# Support NVIDIA NIM and Nebius Token Factory.
-# Streamlit Cloud secrets and local environment variables are supported.
+
+# Support Vercel AI Gateway, NVIDIA NIM and Nebius Token Factory.
 
 try:
     import streamlit as st
@@ -45,10 +45,18 @@ def get_api_key(name):
     return ""
 
 
+AI_GATEWAY_API_KEY = get_api_key("AI_GATEWAY_API_KEY")
 NVIDIA_API_KEY = get_api_key("NVIDIA_API_KEY")
 NEBIUS_API_KEY = get_api_key("NEBIUS_API_KEY")
 
-if NVIDIA_API_KEY and OpenAI:
+if AI_GATEWAY_API_KEY and OpenAI:
+    client = OpenAI(
+        base_url="https://ai-gateway.vercel.sh/v1",
+        api_key=AI_GATEWAY_API_KEY,
+    )
+    MODEL = "anthropic/claude-sonnet-4.6"
+
+elif NVIDIA_API_KEY and OpenAI:
     client = OpenAI(
         base_url=os.getenv(
             "NVIDIA_BASE_URL",
@@ -71,21 +79,12 @@ elif NEBIUS_API_KEY and OpenAI:
     )
     MODEL = os.getenv(
         "NEBIUS_MODEL",
-        os.getenv(
-            "NVIDIA_MODEL",
-            "nvidia/nemotron-3-nano-30b-a3b"
-        )
+        "nvidia/nemotron-3-nano-30b-a3b"
     )
 
 else:
     client = None
-    MODEL = os.getenv(
-        "NEBIUS_MODEL",
-        os.getenv(
-            "NVIDIA_MODEL",
-            "nvidia/nemotron-3-nano-30b-a3b"
-        )
-    )
+    MODEL = "anthropic/claude-sonnet-4.6"
 
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
