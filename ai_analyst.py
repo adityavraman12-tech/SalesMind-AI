@@ -21,26 +21,71 @@ try:
 except ImportError:
     OpenAI = None
 
-# Support either NVIDIA NIM directly or Nebius Token Factory.
-# If both keys are present, NVIDIA_API_KEY takes precedence.
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-NEBIUS_API_KEY = os.getenv("NEBIUS_API_KEY")
+
+# Support NVIDIA NIM and Nebius Token Factory.
+# Streamlit Cloud secrets and local environment variables are supported.
+
+try:
+    import streamlit as st
+except ImportError:
+    st = None
+
+
+def get_api_key(name):
+    value = os.getenv(name)
+    if value:
+        return value
+
+    if st is not None:
+        try:
+            return st.secrets.get(name, "")
+        except Exception:
+            pass
+
+    return ""
+
+
+NVIDIA_API_KEY = get_api_key("NVIDIA_API_KEY")
+NEBIUS_API_KEY = get_api_key("NEBIUS_API_KEY")
 
 if NVIDIA_API_KEY and OpenAI:
     client = OpenAI(
-        base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+        base_url=os.getenv(
+            "NVIDIA_BASE_URL",
+            "https://integrate.api.nvidia.com/v1"
+        ),
         api_key=NVIDIA_API_KEY,
     )
-    MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b")
+    MODEL = os.getenv(
+        "NVIDIA_MODEL",
+        "nvidia/nemotron-3-nano-30b-a3b"
+    )
+
 elif NEBIUS_API_KEY and OpenAI:
     client = OpenAI(
-        base_url=os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1/"),
+        base_url=os.getenv(
+            "NEBIUS_BASE_URL",
+            "https://api.tokenfactory.nebius.com/v1/"
+        ),
         api_key=NEBIUS_API_KEY,
     )
-    MODEL = os.getenv("NEBIUS_MODEL", os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"))
+    MODEL = os.getenv(
+        "NEBIUS_MODEL",
+        os.getenv(
+            "NVIDIA_MODEL",
+            "nvidia/nemotron-3-nano-30b-a3b"
+        )
+    )
+
 else:
     client = None
-    MODEL = os.getenv("NEBIUS_MODEL", os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"))
+    MODEL = os.getenv(
+        "NEBIUS_MODEL",
+        os.getenv(
+            "NVIDIA_MODEL",
+            "nvidia/nemotron-3-nano-30b-a3b"
+        )
+    )
 
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
