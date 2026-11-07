@@ -1144,13 +1144,13 @@ with ai_col:
         if "salesmind_business_review" in st.session_state:
             review = st.session_state["salesmind_business_review"]
             st.success(review.get("answer", "No review was returned."))
-            if review.get("ai_error"):
-             st.warning("AI provider error:")
+        if review.get("ai_error"):
+            st.warning("AI provider error:")
             st.code(review["ai_error"])
-            if review.get("evidence"):
-                with st.expander("Review evidence"):
-                    for evidence_item in review["evidence"]:
-                        st.write(f"• {evidence_item}")
+        if review.get("evidence"):
+            with st.expander("Review evidence"):
+                for evidence_item in review["evidence"]:
+                    st.write(f"• {evidence_item}")
         else:
             st.caption("Generate a review to receive an evidence-based summary and practical next steps.")
 
