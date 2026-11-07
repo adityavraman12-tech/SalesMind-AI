@@ -1,3 +1,5 @@
+
+
 """SalesMind AI: deterministic business metrics with optional NVIDIA Nemotron explanations.
 
 All numeric results are computed locally from the uploaded dataframe. The model is used
@@ -226,6 +228,10 @@ def _deterministic_analysis(df: pd.DataFrame, question: str) -> dict[str, Any]:
 
 def enhance_with_nemotron(question: str, result: dict[str, Any], df: pd.DataFrame) -> dict[str, Any]:
     if client is None:
+        result["ai_error"] = (
+            "No AI provider configured. Check AI_GATEWAY_API_KEY "
+            "in Streamlit Cloud Secrets."
+        )
         return result
     summary = _summary(df)
     prompt = f"""You are SalesMind AI, a careful business intelligence and strategy advisor.
